@@ -36,6 +36,7 @@ class dqn():
         # memories :
         self.mem = np.array([], dtype='int32')
         self.s_mem = np.array([])
+        self.im_mem = np.array([])
         self.ns_mem = np.array([])
         self.a_mem = np.array([], dtype='int32')
         self.r_mem = np.array([])
@@ -253,12 +254,12 @@ class dqn():
     
     def sample_from_memory(self, n):
         """Samples n samples from memory, if possible."""
-        if len(self.mem) == 0:
+        if len(self.a_mem) == 0:
             return None
-        elif len(self.mem) <= n:
-            return np.array(self.mem)
+        elif len(self.a_mem) <= n+2:
+            return np.arange(2, len(self.a_mem))
         else:
-            return np.random.choice(self.mem, size=n)
+            return np.random.choice(np.arange(2, len(self.a_mem)), size=n)
     
     def dq_update(self, state, action, reward, next_state):
         return NotImplemented 
@@ -279,23 +280,27 @@ class dqn():
         #done = False
         reward = 0.0
         R = 0
+        self.env.reset()
         # a number of random plays to fill the memory
-        for i in range(random_start):
-            action = self.random_action()
-            image, r, _, _ = self.env.step(action)
-            if i % self.d == 0:
-                reward += r
-                self.memory_add_im(image)
-                self.memory_add_r(reward)
-            else:
-                reward = r
+        if len(self.a_mem) == 0:
+            for i in range(random_start):
+                action = self.random_action()
+                image, r, _, _ = self.env.step(action)
+                if i % self.d == 0:
+                    reward += r
+                    self.memory_add_im(to_Ychannel(image))
+                    self.memory_add_r(reward)
+                    self.memory_add_a(action)
+                else:
+                    reward = r
         #it = 0
         for it in tqdm(range(self.T)):
             #print("iteration : %s" % it)
             if it % self.d == 0:
                 state = np.array([self.im_mem[-1] - self.im_mem[-2]])
                 action = self.sample_action(state)
-            next_image, next_reward, done, _ = self.env.step(action)
+            image, next_reward, done, _ = self.env.step(action)
+            #print("next_reward : %s" % next_reward)
             if it % self.d == 0:
                 reward += next_reward
             else:
@@ -303,24 +308,21 @@ class dqn():
             if it % self.C == self.C-1:
                 self.copyQnet.set_weights(self.Qnet.get_weights())
             if it % self.d == 0:
-                next_state = np.array([state[1:][0], to_Ychannel(next_image)])
-                
-                self.memory_add(len(self.mem))
-                self.memory_add_s(state)
-                self.memory_add_ns(next_state)
+                #print("reward : %s" % reward)
                 self.memory_add_a(action)
                 self.memory_add_r(reward)
-                self.memory_add_d(done)
+                self.memory_add_im(to_Ychannel(image))
                 
                 # select a minibatch of samples in memory and perform a step
                 # of gradient descent on it
-                batch_ids = self.sample_from_memory(batch_size)
+                batch_ids = np.random.choice(np.arange(2, len(self.a_mem)),
+                                             size=batch_size)
                 #print("batch_ids : %s" % batch_ids)
                 #print("r_mem : %s" % self.r_mem)
                 if batch_ids is not None: # delete this ?
                     #print("smem : %r" % (self.s_mem.shape))
-                    s_batch = self.s_mem[batch_ids]
-                    ns_batch = self.ns_mem[batch_ids]
+                    s_batch = self.im_mem[batch_ids-1] - self.im_mem[batch_ids-2]
+                    ns_batch = self.im_mem[batch_ids] - self.im_mem[batch_ids-1]
                     a_batch = self.a_mem[batch_ids]
                     r_batch = self.r_mem[batch_ids]
                     actions = self.to_categorical(a_batch)
@@ -328,24 +330,16 @@ class dqn():
                     # check if this is correct and gives the states !
                     #self.im_plot([s_batch[:, 0, :, :, :], s_batch[: 1, :, :, :]])  
                     #print(s_batch[:, 1, :, :, :])
-                    im1 = s_batch[:, 1, :, :, :]
-                    im0 = s_batch[:, 0, :, :, :]
-                    images = im1 - im0
-                    
-                    n_im1 = ns_batch[:, 1, :, :, :]
-                    n_im0 = ns_batch[:, 0, :, :, :]
-                    n_images = n_im1 - n_im0
                     maxq = self.discount*self.sess.run(
                         tf.reduce_max(self.copyQnet.output, axis=-1),
-                        feed_dict={self.images:n_images})
+                        feed_dict={self.images:ns_batch})
                     _, tmploss = self.sess.run([self.optimizer, self.loss],
-                                          feed_dict={self.images:images,
+                                          feed_dict={self.images:s_batch,
                                                      self.action_tensor:actions,
                                                      self.reward_tensor:r_batch,
                                                      self.maxq:maxq})
                     self.losses.append(tmploss)
                     self.rewards.append(reward)
-                state = next_state
                 R += reward
             it += 1
         return R
