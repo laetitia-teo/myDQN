@@ -1,41 +1,84 @@
 #import torch
 import numpy as np
 import tensorflow as tf
+import keras
+from keras import backend as K
+from keras import Sequential
+from keras.layers import InputLayer, Conv2D, MaxPooling2D, Dense, Flatten
 from image_preprocessing import to_Ychannel
 import matplotlib.pyplot as plt
 import os
+from tqdm import tqdm
 
 class dqn():
     
-    INIT = 0
-    LOAD = 1
-
-    def __init__(self, env, T=1000, discount=0.99, learning_rate=0.01, d=2, N=100000):
+    def __init__(self,
+                 env,
+                 T=500,
+                 discount=0.99,
+                 learning_rate=0.0005,
+                 d=2,
+                 N=6000,
+                 C=100):
+        # learning algorithm parameters :
         self.env = env
         self.d = d
-        # Neural net that takes a state as input and outputs a vector of probabilies
-        # on action space
-        self.state_shape = [80, 80, 1] # channel is the number of images
-        self.n_actions = self.env.action_space.n
-        self.Qnetwork = self.initialize_Qnetwork()
-        #self.Qnetwork_prev = self.Qnetwork
-        self.memory = self.initialize_memory()
+        self.N = N
+        self.T = T
         self.discount = discount
         self.learning_rate = learning_rate
-        self.N = N
-        self.dir = os.path.dirname(os.path.realpath(__file__))
-        self.T = T
+        self.C = C
+        
+        # env parameters
+        self.state_shape = [80, 80, 1]
+        self.n_actions = self.env.action_space.n
+        
+        # memories :
+        self.mem = np.array([], dtype='int32')
+        self.s_mem = np.array([])
+        self.ns_mem = np.array([])
+        self.a_mem = np.array([], dtype='int32')
+        self.r_mem = np.array([])
+        self.d_mem = np.array([])
+        
+        # tensorflow stuff:
+        self.sess = tf.Session()
+        K.set_session(self.sess)
+        self.min = tf.constant(-1., name="min")
+        self.max = tf.constant(1., name="max")
+        self.Qnet = self.init_Qnet()
+        self.loss = self.initialize_loss()
+        self.optimizer = self.initialize_optimizer()
+        self.copyQnet = keras.models.clone_model(self.Qnet, input_tensors=self.images)
+        init = tf.global_variables_initializer()
+        self.sess.run(init)
+        self.copyQnet.set_weights(self.Qnet.get_weights())
+        
+        # additionnal variables :
+        #self.dir = os.path.dirname(os.path.realpath(__file__))
+        #self.saver = tf.train.Saver()
+        self.losses = []
+        self.rewards = []
     
-    def initialize_memory(self):
-        return []
+    def init_Qnet(self):
+        self.images = tf.placeholder("float", shape=[None]+self.state_shape)
+        model = Sequential()
+        model.add(InputLayer(input_tensor=self.images,
+                             input_shape=[None]+self.state_shape))
+        
+        model.add(Conv2D(32, (5, 5), padding="same", activation="relu"))
+        model.add(Conv2D(64, (3, 3), padding="same", activation="relu"))
+        model.add(MaxPooling2D((2, 2)))
+        model.add(Conv2D(64, (3, 3), padding="same", activation="relu"))
+        model.add(MaxPooling2D((2, 2)))
+        model.add(Flatten())
+        model.add(Dense(256, activation="relu"))
+        model.add(Dense(self.n_actions))
+        
+        return model
     
-    def memory_add(self, elmt):
-        if len(self.memory) >= self.N:
-            self.memory.pop(0)
-        self.memory.append(elmt)
-    
-    def initialize_Qnetwork(self):
-        """Model function for Q-network"""
+    def initialize_Qnet(self):
+        """ConvNet for estimating the state-action value"""
         # None or number of frames presented to the network ?
         # Consider feeding difference frames
         self.images = tf.placeholder("float", shape=[None]+self.state_shape)
@@ -83,13 +126,23 @@ class dqn():
         dropout = tf.layers.dropout(inputs=dense, rate=0.4)
         
         return tf.layers.dense(inputs=dropout, units=self.n_actions)
-        
-    def loss(self, state, action, reward, next_state):
-        q_value = self.Qnetwork[action]
-        q_value_prev = tf.max(self.Qnetwork)
-        return (reward + self.discount*q_value_prev - q_value)**2
     
-    def sample_action(self, sess, state, eps=0.01):
+    def initialize_loss(self):
+        # inputs :
+        self.action_tensor = tf.placeholder("float", shape=[self.n_actions, None])
+        self.reward_tensor = tf.placeholder("float", shape=[None])
+        self.maxq = tf.placeholder("float", shape=[None])
+        # operations :
+        rq = self.reward_tensor + self.maxq
+        # the following should be diagonal :
+        qval = tf.diag_part(tf.matmul(self.Qnet.output, self.action_tensor)) 
+        return tf.reduce_mean(tf.clip_by_value(qval - rq,  self.min, self.max)**2)
+    
+    def initialize_optimizer(self):
+        adam = tf.train.AdamOptimizer(learning_rate = self.learning_rate)
+        return adam.minimize(tf.reduce_mean(self.loss))
+        
+    def sample_action(self, state, eps=0.1):
         """
         Epsilon-greedy sampling of the action through the evaluation by the
         neural net.
@@ -98,70 +151,202 @@ class dqn():
         if p < eps:
             return np.random.choice(self.n_actions)
         else :
-            inpt = np.array([state[0] - state[1]]) # TODO : generalize this !
-            print(inpt.shape)
-            action = sess.run(tf.argmax(self.Qnetwork, axis=-1), feed_dict={self.images:inpt})
+            action = self.sess.run(tf.argmax(self.Qnet.output, axis=-1), 
+                                             feed_dict={self.images:state})
             return action.item()
     
     def random_action(self):
         return np.random.choice(self.n_actions)
     
+    def to_categorical(self, actions):
+        """
+        Converts an array of actions as integers as a numpy array of
+        categorical actions.
+        """
+        a = np.zeros([self.n_actions, len(actions)], dtype=int)
+        a[actions, np.arange(len(actions))] = 1
+        return a
+    
+    def memory_add(self, elmt): 
+        """
+        Adds elmt in memory corresponding to mode.
+        """
+        if not len(self.mem):
+            self.mem = np.array([elmt], dtype='int32')
+        elif len(self.mem) < self.N-1:
+            self.mem = np.insert(self.mem, len(self.mem), elmt, axis=0)
+        else:
+            self.mem = np.roll(self.mem, -1, axis=0)
+            self.mem[-1] = elmt
+    
+    def memory_add_im(self, elmt): 
+        """
+        Adds elmt in memory corresponding to mode.
+        """
+        if not self.im_mem.any():
+            self.im_mem = np.array([elmt])
+        elif len(self.im_mem) < self.N:
+            self.im_mem = np.insert(self.im_mem, len(self.im_mem), elmt, axis=0)
+        else:
+            self.im_mem = np.roll(self.im_mem, -1, axis=0)
+            self.im_mem[-1] = elmt
+    
+    def memory_add_s(self, elmt): 
+        """
+        Adds elmt in memory corresponding to mode.
+        """
+        if not self.s_mem.any():
+            self.s_mem = np.array([elmt])
+        elif len(self.s_mem) < self.N:
+            self.s_mem = np.insert(self.s_mem, len(self.s_mem), elmt, axis=0)
+        else:
+            self.s_mem = np.roll(self.s_mem, -1, axis=0)
+            self.s_mem[-1] = elmt
+    
+    def memory_add_ns(self, elmt): 
+        """
+        Adds elmt in memory corresponding to mode.
+        """
+        if not self.ns_mem.any():
+            self.ns_mem = np.array([elmt])
+        elif len(self.ns_mem) < self.N:
+            self.ns_mem = np.insert(self.ns_mem, len(self.ns_mem), elmt, axis=0)
+        else:
+            self.ns_mem = np.roll(self.ns_mem, -1, axis=0)
+            self.ns_mem[-1] = elmt
+    
+    def memory_add_a(self, elmt): 
+        """
+        Adds elmt in memory corresponding to mode.
+        """
+        if not len(self.a_mem):
+            self.a_mem = np.array([elmt], dtype='int32')
+        elif len(self.a_mem) < self.N:
+            self.a_mem = np.insert(self.a_mem, len(self.a_mem), elmt, axis=0)
+        else:
+            self.a_mem = np.roll(self.a_mem, -1, axis=0)
+            self.a_mem[-1] = elmt
+    
+    def memory_add_r(self, elmt): 
+        """
+        Adds elmt in memory corresponding to mode.
+        """
+        if not len(self.r_mem):
+            self.r_mem = np.array([elmt])
+        elif len(self.r_mem) < self.N:
+            self.r_mem = np.insert(self.r_mem, len(self.r_mem), elmt, axis=0)
+        else:
+            self.r_mem = np.roll(self.r_mem, -1, axis=0)
+            self.r_mem[-1] = elmt
+    
+    def memory_add_d(self, elmt): 
+        """
+        Adds elmt in memory corresponding to mode.
+        """
+        if not len(self.d_mem):
+            self.d_mem = np.array([elmt])
+        elif len(self.d_mem) < self.N:
+            self.d_mem = np.insert(self.d_mem, len(self.d_mem), elmt, axis=0)
+        else:
+            self.d_mem = np.roll(self.d_mem, -1, axis=0)
+            self.d_mem[-1] = elmt
+    
+    def sample_from_memory(self, n):
+        """Samples n samples from memory, if possible."""
+        if len(self.mem) == 0:
+            return None
+        elif len(self.mem) <= n:
+            return np.array(self.mem)
+        else:
+            return np.random.choice(self.mem, size=n)
+    
     def dq_update(self, state, action, reward, next_state):
         return NotImplemented 
     
-    def _episode(self, sess, render=False, s=5):
+    def _episode(self, render=False, batch_size=32, random_start=6000):
         """
         Performs an episode on the environment.
         
-        Must be called from within the learning loop !
-        (Because the Tensorflow session is defined in it).
-        
         Args :
-        sess - The Tensorflow session in which the network computations are done
-        render (bool) - Whether or not to render the episode
-        s (Integer) - Number of selected samples in the minibatch sampled from memory
+        sess - The Tensorflow session in which the network computations are done;
+        render (bool) - Whether or not to render the episode;
+        batch_size (Integer) - Number of selected samples in the minibatch sampled 
+        from memory.
         
         Returns:
         Total reward collected during the episode.
         """
-        done = False
-        state = np.zeros(self.d)
-        state = [to_Ychannel(self.env.reset())]
-        # 2 iterations to fill the state space
-        for i in range(self.d-1):
-            action = self.random_action()
-            state.append(to_Ychannel(self.env.step(action)[0]))
-        state = np.array(state)
-        print(state.shape)
+        #done = False
+        reward = 0.0
         R = 0
-        it = 0
-        while not done and it < self.T:
-            print("iteration : %s" % it)
+        # a number of random plays to fill the memory
+        for i in range(random_start):
+            action = self.random_action()
+            image, r, _, _ = self.env.step(action)
+            if i % self.d == 0:
+                reward += r
+                self.memory_add_im(image)
+                self.memory_add_r(reward)
+            else:
+                reward = r
+        #it = 0
+        for it in tqdm(range(self.T)):
+            #print("iteration : %s" % it)
             if it % self.d == 0:
-                action = self.sample_action(sess, state)
-            print(action)
-            next_image, reward, done, _ = self.env.step(action)
-            if it == self.T - 1 or it == self.T - 2: # TODO : generalize this !
-                done = True
-            next_state = np.append(state[1:], to_Ychannel(next_image))
-            state = next_state
-            R += reward
+                state = np.array([self.im_mem[-1] - self.im_mem[-2]])
+                action = self.sample_action(state)
+            next_image, next_reward, done, _ = self.env.step(action)
             if it % self.d == 0:
-                self.memory_add(np.array([state, action, reward, done, next_state]))
+                reward += next_reward
+            else:
+                reward = next_reward
+            if it % self.C == self.C-1:
+                self.copyQnet.set_weights(self.Qnet.get_weights())
+            if it % self.d == 0:
+                next_state = np.array([state[1:][0], to_Ychannel(next_image)])
+                
+                self.memory_add(len(self.mem))
+                self.memory_add_s(state)
+                self.memory_add_ns(next_state)
+                self.memory_add_a(action)
+                self.memory_add_r(reward)
+                self.memory_add_d(done)
+                
                 # select a minibatch of samples in memory and perform a step
                 # of gradient descent on it
-                minibatch = np.random.choice(self.memory, size=s) # TODO : FIX THIS (empty mem)
-                loss = np.zeros(s)
-                for i, [s, a, r, done, n_s] in enumerate(minibatch):
-                    if done: # this is probably not correct
-                        loss[i] = (self.Qnetwork[a] - r)**2
-                    else:
-                        rq = r + self.discount*tf.max(self.Qnetwork)
-                        loss[i] = (self.Qnetwork[a] - rq)**2
-                opt = tf.train.AdamOptimizer(learning_rate = self.learning_rate).minimize(loss)
-                # check if this is correct and gives the states !
-                inputs = minibatch[:, 0][0] - minibatch[:, 0][1] # TODO : generalize this !
-                _, tmploss = sess.run([opt, loss], feed_dict={self.images:inputs})
+                batch_ids = self.sample_from_memory(batch_size)
+                #print("batch_ids : %s" % batch_ids)
+                #print("r_mem : %s" % self.r_mem)
+                if batch_ids is not None: # delete this ?
+                    #print("smem : %r" % (self.s_mem.shape))
+                    s_batch = self.s_mem[batch_ids]
+                    ns_batch = self.ns_mem[batch_ids]
+                    a_batch = self.a_mem[batch_ids]
+                    r_batch = self.r_mem[batch_ids]
+                    actions = self.to_categorical(a_batch)
+                    
+                    # check if this is correct and gives the states !
+                    #self.im_plot([s_batch[:, 0, :, :, :], s_batch[: 1, :, :, :]])  
+                    #print(s_batch[:, 1, :, :, :])
+                    im1 = s_batch[:, 1, :, :, :]
+                    im0 = s_batch[:, 0, :, :, :]
+                    images = im1 - im0
+                    
+                    n_im1 = ns_batch[:, 1, :, :, :]
+                    n_im0 = ns_batch[:, 0, :, :, :]
+                    n_images = n_im1 - n_im0
+                    maxq = self.discount*self.sess.run(
+                        tf.reduce_max(self.copyQnet.output, axis=-1),
+                        feed_dict={self.images:n_images})
+                    _, tmploss = self.sess.run([self.optimizer, self.loss],
+                                          feed_dict={self.images:images,
+                                                     self.action_tensor:actions,
+                                                     self.reward_tensor:r_batch,
+                                                     self.maxq:maxq})
+                    self.losses.append(tmploss)
+                    self.rewards.append(reward)
+                state = next_state
+                R += reward
             it += 1
         return R
         
@@ -173,19 +358,17 @@ class dqn():
         I (Integer) - the number of episodes to consider in the learning process.
         """
         Rs = []
-        with tf.Session() as sess:
-            init = tf.global_variables_initializer()
-            sess.run(init)
-            for i in range(I):
-                Rs.append(self._episode(sess))
+        for i in range(I):
+            Rs.append(self._episode())
         return Rs
                 
     def im_plot(self, images):
         plt.figure()
         for im in images:
-            plt.subplot()
+            if im.shape[-1] == 1:
+                im = np.squeeze(im, axis=-1)
             plt.imshow(im, cmap='gray')
-        plt.show()
+            plt.show()
 
 
 
