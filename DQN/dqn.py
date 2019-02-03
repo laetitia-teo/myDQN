@@ -281,11 +281,15 @@ class dqn():
         reward = 0.0
         R = 0
         self.env.reset()
+        done = False
         # a number of random plays to fill the memory
+        i = 0
         if len(self.a_mem) == 0:
-            for i in range(random_start):
+            while not done:
+                self.env.render()
                 action = self.random_action()
-                image, r, _, _ = self.env.step(action)
+                image, r, done, _ = self.env.step(action)
+                print(r)
                 if i % self.d == 0:
                     reward += r
                     self.memory_add_im(to_Ychannel(image))
@@ -293,6 +297,8 @@ class dqn():
                     self.memory_add_a(action)
                 else:
                     reward = r
+                i += 1
+            self.env.reset()
         #it = 0
         for it in tqdm(range(self.T)):
             #print("iteration : %s" % it)
