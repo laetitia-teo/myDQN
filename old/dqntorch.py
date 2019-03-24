@@ -177,7 +177,7 @@ class dqn():
                     reward += r
                 i += 1
     
-    def episode(self, render=False, batch_size=32):
+    def episode(self, render=False, batch_size=16):
         """
         Performs an episode on the environment.
         """
@@ -185,7 +185,7 @@ class dqn():
         self.env.reset()
         reward = 0.0
         done = False
-        for it in tqdm(range(self.T)):
+        for it in range(self.T):
             if done:
                 break
             if render:
@@ -195,6 +195,7 @@ class dqn():
                 action = self.sample_action(state)
             image, next_reward, done, _ = self.env.step(action)
             R += next_reward
+            self.rewards.append(next_reward)
             if it % self.d == 0:
                 reward += next_reward
             if it % self.C == 0:
@@ -230,7 +231,8 @@ class dqn():
         return R
         
     def learn(self, I):
-        self.random_episodes(render=True)
+        if not len(self.a_mem):
+            self.random_episodes()
         Rs = []
         for i in tqdm(range(I)):
             Rs.append(self.episode())

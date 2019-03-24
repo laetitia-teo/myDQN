@@ -1,0 +1,2 @@
+model_checkpoint_path: "/home/laetitia/Documents/AI/myDQN/DQN/saves/model"
+all_model_checkpoint_paths: "/home/laetitia/Documents/AI/myDQN/DQN/saves/model"

@@ -3,7 +3,7 @@ import numpy as np
 import skimage
 
 
-def to_Ychannel(image, data_format='channels_last'):
+def preproc(image, data_format='channels_last'):
     """
     Reduces the dimentionnality of the input image for dqn by converting it to
     greyscale, trimming to and bottom and performing a maxpooling to reduce the
