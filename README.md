@@ -17,6 +17,6 @@ The module Qmodels defines different neural approximators, that may be used for 
 
 ### Results
 
-![CartPole](https://github.com/laetitia-teo/myDQN/images/cartpole2.png)
+![CartPole](https://github.com/laetitia-teo/myDQN/tree/master/images/cartpole2.png)
 
 Average of 5 runs on the gym CartPole-v0 environment over 7000 iterations.
