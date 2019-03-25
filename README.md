@@ -8,6 +8,7 @@ Tu run, go in the DQN folder and use :
 
 ```python
 from run import *
+agent.train(7000, 100)
 ```
 
 The agent architecture is defined in dqn.py.
@@ -16,4 +17,6 @@ The module Qmodels defines different neural approximators, that may be used for 
 
 ### Results
 
-![CartPole](https://github.com/laetitia-teo/myDQN/images/cartpole5.png)
+![CartPole](https://github.com/laetitia-teo/myDQN/images/cartpole2.png)
+
+Average of 5 runs on the gym CartPole-v0 environment over 7000 iterations.
